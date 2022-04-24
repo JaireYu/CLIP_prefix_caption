@@ -11,7 +11,7 @@ import sys
 import argparse
 import json
 from typing import Tuple, Optional, Union
-
+from run_inference import evalation
 
 class MappingType(Enum):
     MLP = 'mlp'
@@ -76,6 +76,72 @@ class ClipCocoDataset(Dataset):
         all_len = torch.tensor([len(self.captions_tokens[i]) for i in range(len(self))]).float()
         self.max_seq_len = min(int(all_len.mean() + all_len.std() * 10), int(all_len.max()))
 
+class ClipCocoDatasetVal(Dataset):
+    
+    def __len__(self) -> int:
+        return len(self.image_ids)
+
+    def pad_tokens(self, item: int):
+        tokens = self.captions_tokens[item][0:5]
+        # Attention: Some GT reference have 6 seqs, however, we only take 5 of them to keep the same tensor size
+        # Eval scores is generated using GT file not the tokens, the tokens only for debug
+        assert len(tokens) == 5
+        masks = []
+        for i in range(len(tokens)):
+            padding = self.max_seq_len - tokens[i].shape[0]
+            if padding > 0:
+                tokens[i] = torch.cat((tokens[i], torch.zeros(padding, dtype=torch.int64) - 1))
+                self.captions_tokens[item][i] = tokens[i]
+            elif padding < 0:
+                tokens[i] = tokens[i][:self.max_seq_len]
+                self.captions_tokens[item][i] = tokens[i]
+            mask = tokens[i].ge(0)  # mask is zero where we out of sequence
+            tokens[i][~mask] = 0
+            mask = mask.float()
+            mask = torch.cat((torch.ones(self.prefix_length), mask), dim=0)  # adding prefix mask
+            masks.append(mask)
+        tokens = torch.cat(tokens, dim=0)
+        masks = torch.cat(masks, dim=0)
+        return tokens, masks
+
+    def __getitem__(self, item: int) -> Tuple[torch.Tensor, ...]:
+        tokens, mask = self.pad_tokens(item)
+        prefix = self.prefixes[self.caption2embedding[item]]
+        img_id = torch.tensor(int(self.image_ids[self.caption2embedding[item]]), dtype=torch.int32).unsqueeze(0)
+        if self.normalize_prefix:
+            prefix = prefix.float()
+            prefix = prefix / prefix.norm(2, -1)
+        return tokens, mask, prefix, img_id
+
+    def __init__(self, data_path: str,  prefix_length: int, gpt2_type: str = "gpt2",
+                 normalize_prefix=False):
+        self.tokenizer = GPT2Tokenizer.from_pretrained(gpt2_type)
+        self.prefix_length = prefix_length
+        self.normalize_prefix = normalize_prefix
+        with open(data_path, 'rb') as f:
+            all_data = pickle.load(f)
+        print("Data size is %0d" % len(all_data["clip_embedding"]))
+        sys.stdout.flush()
+        self.prefixes = all_data["clip_embedding"]
+        captions_raw = all_data["captions"]
+        self.image_ids = [caption["image_id"] for caption in captions_raw]
+        self.captions = [caption['caption'] for caption in captions_raw]
+        if os.path.isfile(f"{data_path[:-4]}_tokens.pkl"):
+            with open(f"{data_path[:-4]}_tokens.pkl", 'rb') as f:
+                self.captions_tokens, self.caption2embedding, self.max_seq_len = pickle.load(f)
+        else:
+            self.captions_tokens = []
+            self.caption2embedding = []
+            max_seq_len = 0
+            for caption in captions_raw:
+                self.captions_tokens.append([torch.tensor(self.tokenizer.encode(cap), dtype=torch.int64) for cap in caption['caption']])
+                self.caption2embedding.append(caption["clip_embedding"])
+                max_seq_len = max(max_seq_len, max([len(cap) for cap in self.captions_tokens[-1]]))
+            # self.max_seq_len = max_seq_len
+            with open(f"{data_path[:-4]}_tokens.pkl", 'wb') as f:
+                pickle.dump([self.captions_tokens, self.caption2embedding, max_seq_len], f)
+        all_len = torch.tensor([len(cap) for i in range(len(self)) for cap in self.captions_tokens[i]]).float()
+        self.max_seq_len = min(int(all_len.mean() + all_len.std() * 10), int(all_len.max()))
 
 class MLP(nn.Module):
 
@@ -142,6 +208,10 @@ class MultiHeadAttention(nn.Module):
 
 
 class TransformerLayer(nn.Module):
+    """
+        implement as Pre-LN:ON LAYER NORMALIZATION IN THE TRANSFORMER ARCHITECTURE
+    """
+
 
     def forward_with_attention(self, x, y=None, mask=None):
         x_, attention = self.attn(self.norm1(x), y, mask)
@@ -288,11 +358,12 @@ def load_model(config_path: str, epoch_or_latest: Union[str, int] = '_latest'):
     return model, parser
 
 
-def train(dataset: ClipCocoDataset, model: ClipCaptionModel, args,
+def train(dataset: ClipCocoDataset, datasetval: ClipCocoDatasetVal, model: ClipCaptionModel, args,
           lr: float = 2e-5, warmup_steps: int = 5000, output_dir: str = ".", output_prefix: str = ""):
 
     device = torch.device('cuda:0')
     batch_size = args.bs
+    val_batch_size = args.val_bs
     epochs = args.epochs
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -300,11 +371,13 @@ def train(dataset: ClipCocoDataset, model: ClipCaptionModel, args,
     model.train()
     optimizer = AdamW(model.parameters(), lr=lr)
     train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+    val_dataloader = DataLoader(datasetval, batch_size=val_batch_size, shuffle=False)
     scheduler = get_linear_schedule_with_warmup(
         optimizer, num_warmup_steps=warmup_steps, num_training_steps=epochs * len(train_dataloader)
     )
     # save_config(args)
     for epoch in range(epochs):
+        evalation(model, epoch, args.out_dir, args.val_gt_file, datasetval.tokenizer, val_dataloader, device)
         print(f">>> Training epoch {epoch}")
         sys.stdout.flush()
         progress = tqdm(total=len(train_dataloader), desc=output_prefix)
@@ -331,19 +404,25 @@ def train(dataset: ClipCocoDataset, model: ClipCaptionModel, args,
                 model.state_dict(),
                 os.path.join(output_dir, f"{output_prefix}-{epoch:03d}.pt"),
             )
+        if epoch % args.eval_every == 0 or epoch == epochs - 1:
+            evalation(model, epoch, args.out_dir, args.val_gt_file, datasetval.tokenizer, val_dataloader, device)
     return model
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data', default='./data/coco/oscar_split_train.pkl')
+    parser.add_argument('--data_val', default='./data/coco/oscar_split_val.pkl')
     parser.add_argument('--out_dir', default='./checkpoints')
     parser.add_argument('--prefix', default='coco_prefix', help='prefix for saved filenames')
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--save_every', type=int, default=1)
+    parser.add_argument('--eval_every', type=int, default=1)
     parser.add_argument('--prefix_length', type=int, default=10)
     parser.add_argument('--prefix_length_clip', type=int, default=10)
     parser.add_argument('--bs', type=int, default=40)
+    parser.add_argument('--val_bs', type=int, default=25)
+    parser.add_argument('--val_gt_file', default='./data/coco/annotations/val_caption_coco_format.json')
     parser.add_argument('--only_prefix', dest='only_prefix', action='store_true')
     parser.add_argument('--mapping_type', type=str, default='mlp', help='mlp/transformer')
     parser.add_argument('--num_layers', type=int, default=8)
@@ -352,6 +431,7 @@ def main():
     args = parser.parse_args()
     prefix_length = args.prefix_length
     dataset = ClipCocoDataset(args.data, prefix_length, normalize_prefix=args.normalize_prefix)
+    dataset_val = ClipCocoDatasetVal(args.data_val, prefix_length, normalize_prefix=args.normalize_prefix)
     prefix_dim = 640 if args.is_rn else 512
     args.mapping_type = {'mlp': MappingType.MLP, 'transformer': MappingType.Transformer}[args.mapping_type]
     if args.only_prefix:
@@ -363,7 +443,7 @@ def main():
                                   num_layers=args.num_layers, mapping_type=args.mapping_type)
         print("Train both prefix and GPT")
         sys.stdout.flush()
-    train(dataset, model, args, output_dir=args.out_dir, output_prefix=args.prefix)
+    train(dataset, dataset_val, model, args, output_dir=args.out_dir, output_prefix=args.prefix)
 
 
 if __name__ == '__main__':
