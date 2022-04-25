@@ -377,7 +377,6 @@ def train(dataset: ClipCocoDataset, datasetval: ClipCocoDatasetVal, model: ClipC
     )
     # save_config(args)
     for epoch in range(epochs):
-        evalation(model, epoch, args.out_dir, args.val_gt_file, datasetval.tokenizer, val_dataloader, device)
         print(f">>> Training epoch {epoch}")
         sys.stdout.flush()
         progress = tqdm(total=len(train_dataloader), desc=output_prefix)
@@ -405,7 +404,7 @@ def train(dataset: ClipCocoDataset, datasetval: ClipCocoDatasetVal, model: ClipC
                 os.path.join(output_dir, f"{output_prefix}-{epoch:03d}.pt"),
             )
         if epoch % args.eval_every == 0 or epoch == epochs - 1:
-            evalation(model, epoch, args.out_dir, args.val_gt_file, datasetval.tokenizer, val_dataloader, device)
+            evalation(model, epoch, args.out_dir, args.val_gt_file, datasetval.tokenizer, val_dataloader, device, use_beam_search=True, beam=5)
     return model
 
 

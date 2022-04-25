@@ -240,6 +240,8 @@ def batched_generate2(
         batch_size = embed.shape[0]
     else:
         batch_size = tokens.shape[0]
+    stop_flag = torch.zeros((batch_size), device=device, dtype=torch.bool)
+    seq_lengths = torch.zeros((batch_size), device=device)
     with torch.no_grad():
 
         if embed is not None:
@@ -264,23 +266,28 @@ def batched_generate2(
                                                 ].clone()
             sorted_indices_to_remove[..., 0] = 0
             # remove index start index + 1, to avoid the first token > 0.8
-            indices_to_remove = sorted_indices[sorted_indices_to_remove]
-            logits[:, indices_to_remove] = filter_value
-            next_token = torch.argmax(logits, -1).unsqueeze(0)
+            # indices_to_remove = sorted_indices[sorted_indices_to_remove]
+            _, new_sorted_indices = torch.sort(sorted_indices)
+            sorted_logits[sorted_indices_to_remove] = filter_value
+            logits = sorted_logits.gather(1, new_sorted_indices)
+            next_token = torch.argmax(logits, -1).unsqueeze(1)
             next_token_embed = model.gpt.transformer.wte(next_token)
             if tokens is None:
                 tokens = next_token
             else:
                 tokens = torch.cat((tokens, next_token), dim=1)
             generated = torch.cat((generated, next_token_embed), dim=1)
-            if stop_token_index == next_token.item():
+            seq_lengths[~stop_flag] += 1
+            stop_flag = stop_flag | (stop_token_index == next_token).squeeze()
+            if stop_flag.sum() == batch_size:
                 break
-
-            output_list = list(tokens.squeeze().cpu().numpy())
-            output_text = tokenizer.decode(output_list)
-            generated_list.append(output_text)
-
-    return generated_list[0]
+        output_list = list(tokens.cpu().numpy())
+        batch_output = []
+        for b in range(batch_size):
+            output = output_list[b]
+            length = seq_lengths[b]
+            batch_output.append(tokenizer.decode(output[:int(length)]))
+    return batch_output
 
 def seed_torch(seed=1029):
     random.seed(seed)
@@ -300,19 +307,21 @@ def json_writer(values, f):
     json_str = json.dumps(res, indent=4)
     f.write(json_str)
 
-def evalation(model, epoch_id, output_dir, gt_file, tokenizer, data_loader, device, mode='val'):
-    use_beam_search = True
+def evalation(model, epoch_id, output_dir, gt_file, tokenizer, data_loader, device, use_beam_search = False, beam = 5, mode='val'):
+    use_beam_search = False
     def _generate():
         with torch.no_grad():
             for idx, (tokens, mask, prefix, img_id) in enumerate(tqdm(data_loader)):
                 prefix = prefix.to(device)
                 prefix_embed = model.clip_project(prefix).view(-1, model.prefix_length, model.gpt_embedding_size)
                 if use_beam_search:
-                    generated_text_prefix = batched_generate_beam(model, tokenizer, beam_size=2, embed=prefix_embed)
+                    generated_text_prefix = batched_generate_beam(model, tokenizer, beam_size=beam, embed=prefix_embed)
+                    for i, g in zip(img_id, generated_text_prefix):
+                        yield i, g[0]
                 else:
-                    generated_text_prefix = generate2(model, tokenizer, embed=prefix_embed)
-                for i, g in zip(img_id, generated_text_prefix):
-                    yield i, g[0]
+                    generated_text_prefix = batched_generate2(model, tokenizer, embed=prefix_embed)
+                    for i, g in zip(img_id, generated_text_prefix):
+                        yield i, g
     f = open(os.path.join(output_dir, "epoch{}_{}.json".format(str(epoch_id), mode)), 'w')
     json_writer(_generate(), f)
     coco = COCO(gt_file)
