@@ -12,6 +12,19 @@ import argparse
 import json
 from typing import Tuple, Optional, Union
 from run_inference import evalation
+import random
+import numpy as np
+
+def seed_torch(seed=1029):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed) # if you are using multi-GPU.
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.enabled = False
 
 class MappingType(Enum):
     MLP = 'mlp'
@@ -427,8 +440,10 @@ def main():
     parser.add_argument('--num_layers', type=int, default=8)
     parser.add_argument('--is_rn', dest='is_rn', action='store_true')
     parser.add_argument('--normalize_prefix', dest='normalize_prefix', action='store_true')
+    parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args()
     prefix_length = args.prefix_length
+    seed_torch(args.seed)
     dataset = ClipCocoDataset(args.data, prefix_length, normalize_prefix=args.normalize_prefix)
     dataset_val = ClipCocoDatasetVal(args.data_val, prefix_length, normalize_prefix=args.normalize_prefix)
     prefix_dim = 640 if args.is_rn else 512
