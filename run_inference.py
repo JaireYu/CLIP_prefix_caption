@@ -297,7 +297,6 @@ def json_writer(values, f):
     f.write(json_str)
 
 def evalation(model, epoch_id, output_dir, gt_file, tokenizer, data_loader, device, use_beam_search = False, beam = 5, mode='val'):
-    use_beam_search = False
     def _generate():
         with torch.no_grad():
             for idx, (tokens, mask, prefix, img_id) in enumerate(tqdm(data_loader)):

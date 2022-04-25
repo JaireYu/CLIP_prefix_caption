@@ -374,7 +374,7 @@ def load_model(config_path: str, epoch_or_latest: Union[str, int] = '_latest'):
 def train(dataset: ClipCocoDataset, datasetval: ClipCocoDatasetVal, model: ClipCaptionModel, args,
           lr: float = 2e-5, warmup_steps: int = 5000, output_dir: str = ".", output_prefix: str = ""):
 
-    device = torch.device('cuda:0')
+    device = torch.device('cuda')
     batch_size = args.bs
     val_batch_size = args.val_bs
     epochs = args.epochs
@@ -417,7 +417,7 @@ def train(dataset: ClipCocoDataset, datasetval: ClipCocoDatasetVal, model: ClipC
                 os.path.join(output_dir, f"{output_prefix}-{epoch:03d}.pt"),
             )
         if epoch % args.eval_every == 0 or epoch == epochs - 1:
-            evalation(model, epoch, args.out_dir, args.val_gt_file, datasetval.tokenizer, val_dataloader, device, use_beam_search=True, beam=5)
+            evalation(model, epoch, args.out_dir, args.val_gt_file, datasetval.tokenizer, val_dataloader, device, use_beam_search=args.beam_search, beam=5)
     return model
 
 
@@ -433,13 +433,14 @@ def main():
     parser.add_argument('--prefix_length', type=int, default=10)
     parser.add_argument('--prefix_length_clip', type=int, default=10)
     parser.add_argument('--bs', type=int, default=40)
-    parser.add_argument('--val_bs', type=int, default=25)
+    parser.add_argument('--val_bs', type=int, default=20)
     parser.add_argument('--val_gt_file', default='./data/coco/annotations/val_caption_coco_format.json')
     parser.add_argument('--only_prefix', dest='only_prefix', action='store_true')
     parser.add_argument('--mapping_type', type=str, default='mlp', help='mlp/transformer')
     parser.add_argument('--num_layers', type=int, default=8)
     parser.add_argument('--is_rn', dest='is_rn', action='store_true')
     parser.add_argument('--normalize_prefix', dest='normalize_prefix', action='store_true')
+    parser.add_argument('--beam_search', dest='beam_search', action='store_true')
     parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args()
     prefix_length = args.prefix_length
