@@ -54,8 +54,8 @@ class ClipCocoDataset(Dataset):
     def __getitem__(self, item: int) -> Tuple[torch.Tensor, ...]:
         tokens, mask = self.pad_tokens(item)
         prefix = self.prefixes[self.caption2embedding[item]]
+        prefix = prefix.float()
         if self.normalize_prefix:
-            prefix = prefix.float()
             prefix = prefix / prefix.norm(2, -1)
         return tokens, mask, prefix
 
@@ -121,8 +121,8 @@ class ClipCocoDatasetVal(Dataset):
         tokens, mask = self.pad_tokens(item)
         prefix = self.prefixes[self.caption2embedding[item]]
         img_id = torch.tensor(int(self.image_ids[self.caption2embedding[item]]), dtype=torch.int32).unsqueeze(0)
+        prefix = prefix.float()
         if self.normalize_prefix:
-            prefix = prefix.float()
             prefix = prefix / prefix.norm(2, -1)
         return tokens, mask, prefix, img_id
 
@@ -416,6 +416,7 @@ def train(dataset: ClipCocoDataset, datasetval: ClipCocoDatasetVal, model: ClipC
                 model.state_dict(),
                 os.path.join(output_dir, f"{output_prefix}-{epoch:03d}.pt"),
             )
+        prefix
         if epoch % args.eval_every == 0 or epoch == epochs - 1:
             evalation(model, epoch, args.out_dir, args.val_gt_file, datasetval.tokenizer, val_dataloader, device, use_beam_search=args.beam_search, beam=5)
     return model
