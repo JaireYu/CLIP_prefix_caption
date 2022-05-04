@@ -335,6 +335,9 @@ class ClipCaptionPrefix(ClipCaptionModel):
     def parameters(self, recurse: bool = True):
         return self.clip_project.parameters()
 
+    def named_parameters(self, recurse: bool = True):
+        return self.clip_project.named_parameters()
+
     def train(self, mode: bool = True):
         super(ClipCaptionPrefix, self).train(mode)
         self.gpt.eval()
